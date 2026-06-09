@@ -8,35 +8,39 @@
     },
     {
       "speaker": "tutor",
-      "content": "You’ve got this—this is a great “parallel lines” problem.\n\nFirst, what do you remember about the slopes of **parallel** lines? (In particular: if two lines are parallel, how are their slopes related?)\n\nAlso, can you show what you’ve tried so far—especially any work toward finding the slope of the line \\(2x-3y+5=0\\)?"
+      "content": "You’ve got this! Let’s start with what you already know: **parallel lines have the same slope**.\n\nThe line is given as  \n$$2x-3y+5=0.$$\n\n**What is the slope of a line in the form $Ax+By+C=0$?**  \n(Equivalently: can you rewrite $2x-3y+5=0$ into $y=mx+b$ and tell me what $m$ is?)\n\nIf you try that and get stuck, show me your work so far and I’ll help you fix it."
     },
     {
       "speaker": "student",
-      "content": "I remember parallel lines have the same slope, but I’m not sure how to get the slope from \\(2x-3y+5=0\\). I tried rearranging but I’m getting confused—can you check my steps if I try rewriting it?"
+      "content": "I know parallel lines have the same slope, but I’m not sure how to get the slope from \\(2x-3y+5=0\\). Do I rewrite it to \\(y=mx+b\\) first?"
     },
     {
       "speaker": "tutor",
-      "content": "Great—your memory about parallel lines is exactly the right start.\n\nNow let’s focus on getting the slope from  \n\\[\n2x-3y+5=0.\n\\]\n\nTry this: rearrange the equation into **slope-intercept form** \\(y=mx+b\\).  \nThat usually means solving for \\(y\\).\n\nWhat do you get when you move the \\(2x\\) and \\(+5\\) terms to the other side and then divide by \\(-3\\)?  \n\n(Once you have \\(y=mx+b\\), the coefficient \\(m\\) is the slope you need, and then you can use that slope with the point \\((-2,3)\\) to write the parallel line.)"
+      "content": "Yes—rewriting to $y=mx+b$ is the best move.\n\nTry this: from\n$$2x-3y+5=0$$\nisolate $y$ so you can see the coefficient of $x$. What do you get for $y$ in terms of $x$ (especially the value of $m$)?"
     },
     {
       "speaker": "student",
-      "content": "I tried rearranging: \\(2x-3y+5=0 \\Rightarrow -3y=-2x-5\\). Then dividing by \\(-3\\) gives \\(y=\\frac{2}{3}x+\\frac{5}{3}\\). So the slope \\(m\\) is \\(\\frac{2}{3}\\), right?"
+      "content": "I’ll try to rewrite it: \\(2x-3y+5=0\\) so \\(-3y=-2x-5\\), then \\(y=\\frac{2}{3}x+\\frac{5}{3}\\). So the slope \\(m\\) should be \\(\\frac{2}{3}\\), right?"
     },
     {
       "speaker": "tutor",
-      "content": "Yes! ✅ Your rearranging is correct, and so is the slope.\n\nSince the line is parallel to \\(2x-3y+5=0\\), it must have the **same slope**:\n\\[\nm=\\frac{2}{3}.\n\\]\n\nNow the next step is to use the point \\(A(-2,3)\\) to write the equation of the parallel line.\n\nTry using **point-slope form**:\n\\[\ny-3=\\frac{2}{3}(x-(-2)).\n\\]\nCan you simplify that to a linear equation (either slope-intercept form or the standard form \\(2x-3y+c=0\\))?"
+      "content": "Yes! Your work is correct:  \n\\[\n2x-3y+5=0 \\;\\Rightarrow\\; y=\\frac{2}{3}x+\\frac{5}{3},\n\\]\nso the slope is indeed $m=\\frac{2}{3}$.\n\nNow use the fact that the line through $A(-2,3)$ is **parallel**, so it has the same slope $\\frac{2}{3}$.  \n\nNext step: write an equation using **point-slope form** with point $(-2,3)$ and slope $\\frac{2}{3}$. What would that look like? (It should involve $y-3$ and $x-(-2)=x+2$.)"
     },
     {
       "speaker": "student",
-      "content": "Okay, I’ll try simplifying point-slope form:  \n\\(y-3=\\frac{2}{3}(x+2)\\). So \\(y-3=\\frac{2}{3}x+\\frac{4}{3}\\), then \\(y=\\frac{2}{3}x+\\frac{4}{3}+3=\\frac{2}{3}x+\\frac{13}{3}\\). Is that right?"
+      "content": "Okay, point-slope form would be \\(y-3=\\frac{2}{3}(x+2)\\) since the slope is \\(\\frac{2}{3}\\) and the x-value is \\(-2\\). Should I just expand it to get the final equation?"
     },
     {
       "speaker": "tutor",
-      "content": "Yes! ✅ That’s **right**.\n\nYou correctly used the slope \\(m=\\frac{2}{3}\\) and the point \\((-2,3)\\) in point-slope form, and your simplification gives\n\\[\ny=\\frac{2}{3}x+\\frac{13}{3}.\n\\]\n\nIf you want the **standard form** too, multiply by 3 to get \\(3y=2x+13\\), then rearrange:\n\\[\n2x-3y+13=0.\n\\]\n\nNice work—you’ve got the correct equation. Would you like to write it in standard form or slope-intercept form as your final answer?"
+      "content": "Yes—now you should expand/simplify to get it into a standard equation form.\n\nStarting from:\n\\[\ny-3=\\frac{2}{3}(x+2)\n\\]\n\nFirst, multiply out the right side (distribute \\(\\frac{2}{3}\\) to both \\(x\\) and \\(2\\)). Then you can solve for \\(y\\) (or move everything to one side to match the form \\(Ax+By+C=0\\)).\n\nWhat do you get after distributing?"
     },
     {
       "speaker": "student",
-      "content": "I think I’m done then—my final answer is \\(y=\\frac{2}{3}x+\\frac{13}{3}\\), or equivalently \\(2x-3y+13=0\\). Does either format count as correct?"
+      "content": "Distributing \\(\\frac{2}{3}\\) gives \\(y-3=\\frac{2}{3}x+\\frac{4}{3}\\). Then adding 3 to both sides: \\(y=\\frac{2}{3}x+\\frac{4}{3}+3=\\frac{2}{3}x+\\frac{13}{3}\\)."
+    },
+    {
+      "speaker": "tutor",
+      "content": "Great job—your simplification is correct. From  \n$$y-3=\\frac{2}{3}(x+2) \\Rightarrow y=\\frac{2}{3}x+\\frac{13}{3}.$$\n\nTo match one of the usual forms, you can also convert it back to standard form by multiplying by $3$:\n\nStarting with  \n$$y=\\frac{2}{3}x+\\frac{13}{3},$$\nmultiply both sides by $3$ and rearrange to see if you get  \n$$2x-3y+13=0.$$\n\nDoes that conversion give you the same equation?"
     }
   ]
 }

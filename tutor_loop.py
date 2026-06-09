@@ -124,7 +124,6 @@ print(f"STUDENT: {conversation[0]['content']}\n")
 
 
 for rnd in range(NUM_ROUNDS):
-    print(f"ROUND {rnd + 1} \n")
 
     tutor_reply = call_model(
         role_prompt=tutor_prompt,
@@ -155,6 +154,37 @@ for rnd in range(NUM_ROUNDS):
     )
 
     print(f"STUDENT: {student_reply} \n")
+
+
+
+
+
+# Final Tutor response
+
+fin_tutor_reply = call_model(
+    role_prompt=tutor_prompt,
+    conversation=conversation,
+    speaker="tutor",
+)
+
+conversation.append(
+    {
+        "speaker": "tutor",
+        "content": fin_tutor_reply,
+    }
+)
+
+print(f"Tutor: {fin_tutor_reply}\n")
+
+
+
+
+
+
+
+
+
+
 
 
 
