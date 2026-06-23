@@ -19,9 +19,6 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-nano")
 
 
-NUM_ROUNDS = 4
-
-
 format_prompt = (
     "Write your answers in GitHub supported Markdown. "
     "Wrap inline math expressions with '$' and block math expressions with '\\n$$\\n'. "
@@ -122,7 +119,16 @@ student_scenarios = [
 STUDENT_DATA_PATH = Path("valid_student_data.csv")
 TARGET_GRADE = 11
 TARGET_PROBLEM_ID = 1
-NUM_STYLE_EXAMPLES = 20
+# NUM_STYLE_EXAMPLES = 1
+
+
+
+
+NUM_ROUNDS = 4
+CONVERSATION_ID_COLUMN = "conversation_id" 
+NUM_VARIATIONS = 5 
+RAND = 1
+
 
 
 def clean_student_message(message):
@@ -136,12 +142,14 @@ def clean_student_message(message):
 
 
 
-def load_student_style_examples(csv_path, grade, problem_id, num_examples):
+
+
+def load_student_style_examples(csv_path, grade, problem_id):
 # def load_student_style_examples(csv_path, grade, num_examples=20):
 
     data = pd.read_csv(csv_path)
 
-    required_columns = {"role", "message", "grade", "problem_id"}
+    required_columns = {"role", "message", "grade", "problem_id", CONVERSATION_ID_COLUMN}
     # required_columns = {"role", "message", "grade"}
 
     missing_columns = required_columns - set(data.columns)
@@ -150,67 +158,102 @@ def load_student_style_examples(csv_path, grade, problem_id, num_examples):
         raise ValueError(
             f"The CSV is missing these columns: {sorted(missing_columns)}"
         )
+    
 
-    student_messages = data[
+    student_data = data[
         (data["role"] == "user")
         & (data["grade"] == grade)
         & (data["problem_id"] == problem_id)
-    ]["message"]
-
-    student_messages = (
-        student_messages
-        .dropna()
-        .apply(clean_student_message)
+    ].copy()
+    
+    student_data["message"] = (
+    student_data["message"]
+    .dropna()
+    .apply(clean_student_message)
     )
 
-    student_messages = student_messages[
-        student_messages.str.len() > 0
-    ].drop_duplicates()
+    student_data = student_data[
+    student_data["message"].str.len() > 0
+    ].drop_duplicates(
+        subset=[CONVERSATION_ID_COLUMN, "message"]
+    )
 
-    if student_messages.empty:
+    if student_data.empty:
         raise ValueError(
             f"No student messages were found for grade {grade}, "
             f"problem {problem_id}."
+    )
+
+
+ 
+    # sample_size = min(num_examples, len(student_messages))
+
+    # examples = student_messages.sample(
+    #     n=sample_size,
+    #     random_state=1,
+    # ).tolist()
+
+    # return examples
+
+    real_student_conversations = []
+
+    for conversation_id, conversation_rows in student_data.groupby(CONVERSATION_ID_COLUMN, sort=False):
+        messages = conversation_rows["message"].tolist()
+
+        if not messages:
+            continue
+
+        real_student_conversations.append(
+            {
+                "conversation_id": str(conversation_id),
+                "messages": messages,
+            }
         )
 
-    sample_size = min(num_examples, len(student_messages))
+    if not real_student_conversations:
+        raise ValueError(
+            f"No student conversations were found for grade {grade}, "
+            f"problem {problem_id}."
+        )
 
-    examples = student_messages.sample(
-        n=sample_size,
-        random_state=1,
-    ).tolist()
-
-    return examples
-
+    return real_student_conversations
 
 
 
-student_style_examples = load_student_style_examples(
+
+
+real_student_conversations = load_student_style_examples(
     csv_path=STUDENT_DATA_PATH,
     grade=TARGET_GRADE,
-    problem_id=TARGET_PROBLEM_ID,
-    num_examples=NUM_STYLE_EXAMPLES,
+    problem_id=TARGET_PROBLEM_ID
 )
 
 
 
-
-def format_style_examples(examples):
-    formatted_examples = []
-
-    for example in examples:
-        formatted_examples.append(f'- "{example}"')
-
-    return "\n".join(formatted_examples)
+def sample_real_student_conversation(conversations, random_state):
+    return conversations.sample(
+        n=1,
+        random_state=random_state,
+    ).iloc[0]
 
 
 
 
+def format_style_conversation(sampled_conversation):
+    formatted_messages = []
+
+    for message in sampled_conversation["messages"]:
+        formatted_messages.append(f'- "{message}"')
+
+    return "\n".join(formatted_messages)
 
 
-def create_student_prompt(scenario):
 
-    style_examples_text = format_style_examples(student_style_examples)
+
+
+def create_student_prompt(scenario, sampled_conversation):
+    style_examples_text  = format_style_conversation(sampled_conversation)
+
 
     return f"""
         You are acting as a realistic high school student working through a math problem with the help of a tutor.
@@ -301,8 +344,11 @@ def call_model(role_prompt, conversation, speaker):
 
 
 
-def run_conversation(scenario):
-    student_prompt = create_student_prompt(scenario)
+def run_conversation(scenario, sampled_conversation, generation_number):
+    student_prompt = create_student_prompt(
+            scenario=scenario,
+            sampled_conversation=sampled_conversation,
+        )
 
     conversation = [
         {
@@ -313,6 +359,15 @@ def run_conversation(scenario):
 
     print("\n")
     print(f"Which Student?: {scenario['student_id']}")
+
+    print(f"Generation: {generation_number}")
+    print(
+        "Sampled real conversation: "
+        f"{sampled_conversation['conversation_id']}"
+    )
+  
+
+
     print(f"Hidden Misunderstanding: {scenario['misunderstanding']}")
 
     print(f"\n Student: {conversation[0]['content']}\n")
@@ -355,7 +410,7 @@ def run_conversation(scenario):
     final_tutor_reply = call_model(
     role_prompt=tutor_prompt,
     conversation=conversation,
-    speaker="tutor",
+    speaker="tutor"
     )
 
     conversation.append(
@@ -367,41 +422,104 @@ def run_conversation(scenario):
 
     print(f"Tutor: {final_tutor_reply}\n")
 
+   
     return {
-    "student_id": scenario["student_id"],
-    "hidden_misunderstanding": scenario["misunderstanding"],
-    "conversation": conversation,
+            "generation_number": generation_number,
+            "student_id": scenario["student_id"],
+            "hidden_misunderstanding": scenario["misunderstanding"],
+            "sampled_real_conversation_id": (
+                sampled_conversation["conversation_id"]
+            ),
+            "sampled_real_student_messages": (
+                sampled_conversation["messages"]
+            ),
+            "conversation": conversation,
+        }
+
+
+
+
+
+
+# all_results = []
+
+# for scenario in student_scenarios:
+#     result = run_conversation(scenario)
+#     all_results.append(result)
+
+
+
+real_conversations_df = pd.DataFrame(real_student_conversations)
+
+output_directory = Path("outputs")
+output_directory.mkdir(exist_ok=True)
+
+output_filenames = [
+    "misunderstanding_1_wrong_slope.json",
+    "misunderstanding_2_cant_write_equation.json",
+    "misunderstanding_3_wrong_c.json",
+]
+
+
+
+total_conversations = 0
+
+
+for scenario_index, scenario in enumerate(student_scenarios):
+    scenario_results = []
+
+    for generation_index in range(
+        NUM_VARIATIONS
+    ):
+        generation_number = generation_index + 1
+
+        sample_seed = (
+            RAND
+            + scenario_index * NUM_VARIATIONS
+            + generation_index
+        )
+
+        sampled_conversation = sample_real_student_conversation(
+            conversations=real_conversations_df,
+            random_state=sample_seed,
+        )
+
+        result = run_conversation(
+            scenario=scenario,
+            sampled_conversation=sampled_conversation,
+            generation_number=generation_number
+        )
+
+        scenario_results.append(result)
+        total_conversations += 1
+
+    scenario_output = {
+        "model": MODEL,
+        "problem": problem,
+        "grade": TARGET_GRADE,
+        "problem_id": TARGET_PROBLEM_ID,
+        "num_rounds": NUM_ROUNDS,
+        "student_id": scenario["student_id"],
+        "hidden_misunderstanding": scenario["misunderstanding"],
+        "num_generated_conversations": len(scenario_results),
+        "results": scenario_results,
     }
 
+    output_path = output_directory / output_filenames[scenario_index]
 
+    with output_path.open("w", encoding="utf-8") as file:
+        json.dump(scenario_output, file, indent=2, ensure_ascii=False)
 
+    print(
+        f"Saved {len(scenario_results)} conversations to "
+        f"{output_path}"
+    )
 
+print(
+    f"\nFinished generating {total_conversations} conversations "
+    f"for {len(student_scenarios)} misunderstandings."
+)
 
-all_results = []
-
-for scenario in student_scenarios:
-    result = run_conversation(scenario)
-    all_results.append(result)
-
-
-
-
-
-
-Path("outputs").mkdir(exist_ok=True)
-
-output = {
-    "model": MODEL,
-    "problem": problem,
-    "num_rounds": NUM_ROUNDS,
-    "results": all_results,
-}
-
-
-with open("outputs/transcript.json", "w", encoding="utf-8") as file:
-    json.dump(output, file, indent=2, ensure_ascii=False)
-
-print(f"\nSaved transcripts")
 
 
 
