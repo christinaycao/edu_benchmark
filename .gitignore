@@ -2,3 +2,7 @@
 __pycache__/
 *.pyc
 .venv/
+
+test/test.py
+test/test2.py
+test/prep_student_data.py
