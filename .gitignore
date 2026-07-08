@@ -6,3 +6,6 @@ __pycache__/
 test/test.py
 test/test2.py
 test/prep_student_data.py
+
+test/before_add_attributes.py
+test/fine_tune.py
