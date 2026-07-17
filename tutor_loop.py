@@ -17,6 +17,8 @@ load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4")
+JUDGE_MODEL = os.getenv("OPENAI_JUDGE_MODEL", MODEL)
+
 
 
 format_prompt = (
@@ -27,9 +29,13 @@ format_prompt = (
 
 
 
+base_tutor = """
+You are ChatGPT, a large language model trained by OpenAI. 
+Your goal is to tutor a student, helping them through the process of solving the math problem below.
+Please follow the student's instructions carefully. 
+"""
 
-
-generic_tutor_prompt = """
+general_tutor = """
 You are a general-purpose tutor helping a high school student work through a math problem.
 Your goal is to help a high school student develop a better understanding of core concepts in a math lesson. The student is working on practice problems. In this context, you should help them solve their problem if they are stuck on a step, but without providing them with the full solution.
 * You should be encouraging, letting the student know they are capable of working out the problem.
@@ -39,10 +45,13 @@ Your goal is to help a high school student develop a better understanding of cor
 * However, if the student provides an answer to the problem, you should tell them whether their answer is correct or not. You should accept answers that are equivalent to the correct answer.
 * If the student directly gives the answer without your guidance, let them know the answer is correct, but ask them to explain their solution to check the correctness.
 * You should not discuss anything with the student outside of topics specifically related to the problem they are trying to solve.
-
 """
 
-tutor_prompt = format_prompt + generic_tutor_prompt
+base_tutor_prompt = format_prompt + base_tutor 
+
+generic_tutor_prompt = format_prompt + general_tutor 
+
+# tutor_prompt = format_prompt + generic_tutor_prompt
 
 
 
@@ -276,7 +285,6 @@ def label_student_attributes(sampled_conversation):
             "communication_style": "The student's wording style, length, tone, punctuation, formality, and level of detail."
         }}
 
-        Don't include markdown.
         Don't include extra explanation.
     """
 
@@ -348,8 +356,11 @@ def call_model(role_prompt, conversation, speaker):
     
     user_message = f"""
 
-    Here is the conversation so far:
+    The assigned problem is:
+    {problem}
 
+    
+    Here is the conversation so far:
     {transcript}
 
     Now continue the conversation as the {speaker}.
@@ -376,21 +387,281 @@ def call_model(role_prompt, conversation, speaker):
 
 
 
-def run_conversation(sampled_conversation, generation_number):
-    student_attributes = label_student_attributes(sampled_conversation=sampled_conversation)
 
-    student_prompt = create_student_prompt(
-            sampled_conversation=sampled_conversation,
-            student_attributes=student_attributes,
+
+def load_correct_answer(csv_path, grade, problem_id):
+
+    data = pd.read_csv(csv_path)
+
+    matching_prompts = data[
+        (data["role"] == "system")
+        & (data["grade"] == grade)
+        & (data["problem_id"] == problem_id)
+        & (data["treatment"] == "aug")
+    ]["message"].dropna().drop_duplicates()
+
+    if matching_prompts.empty:
+        raise ValueError(
+            f"No augmented system prompt was found for grade {grade}, problem {problem_id}."
         )
+
+    start_text = "The correct solution is"
+    end_text = ". To get this solution"
+
+    for prompt in matching_prompts:
+        prompt = str(prompt)
+
+        if start_text in prompt and end_text in prompt:
+            correct_answer = (
+                prompt
+                .split(start_text, 1)[1]
+                .split(end_text, 1)[0]
+                .strip()
+            )
+
+            return correct_answer
+
+    raise ValueError(
+        f"The correct solution could not be extracted for grade {grade}, problem {problem_id}."
+    )
+
+
+
+
+correct_answer = load_correct_answer(
+    csv_path=STUDENT_DATA_PATH,
+    grade=TARGET_GRADE,
+    problem_id=TARGET_PROBLEM_ID
+)
+
+
+
+
+
+
+
+
+
+def load_solution_steps(csv_path, grade, problem_id):
+
+    data = pd.read_csv(csv_path)
+
+    matching_prompts = data[
+        (data["role"] == "system")
+        & (data["grade"] == grade)
+        & (data["problem_id"] == problem_id)
+        & (data["treatment"] == "aug")
+    ]["message"].dropna().drop_duplicates()
+
+    if matching_prompts.empty:
+        raise ValueError(
+            f"No augmented system prompt was found for grade {grade}, problem {problem_id}."
+        )
+
+    start_text = "To get this solution, the student should"
+    end_text = "\n*"
+
+    for prompt in matching_prompts:
+        prompt = str(prompt)
+
+        if start_text in prompt:
+            solution_steps = prompt.split(start_text, 1)[1]
+
+            if end_text in solution_steps:
+                solution_steps = solution_steps.split(end_text, 1)[0]
+
+            return solution_steps.strip()
+
+    raise ValueError(
+        f"The solution steps could not be extracted for grade {grade}, problem {problem_id}."
+    )
+
+
+
+
+solution_steps = load_solution_steps(
+    csv_path=STUDENT_DATA_PATH,
+    grade=TARGET_GRADE,
+    problem_id=TARGET_PROBLEM_ID
+)
+
+
+
+
+
+
+
+
+
+def judge_conversation(conversation):
+    transcript = format_conversation_judge(conversation)
+
+    judge_prompt = f"""
+        You are evaluating the quality of an AI tutor in a simulated math tutoring conversation.
+
+        The assigned problem is:
+        {problem}
+
+        The correct answer is:
+        {correct_answer}
+
+        The expected solution process is:
+        {solution_steps}
+
+
+        Score the conversation between the tutor model and student on each of the following five criteria from 1 to 10.
+
+        For each criterion, use any whole-number score from 1 through 10.:
+        - A score of 1 means the conversation performs extremely poorly on that criterion.
+        - A score of 5 means the conversation performs moderately on that criterion.
+        - A score of 10 means the conversation performs extremely well on that criterion.
+
+        1. student_independence:
+        How much of the mathematical reasoning and/or problem solving did the student do independently, rather than just receiving 
+        steps or answers from the tutor?
+            A score of 1 means the student performed almost none of the reasoning independently.
+            A score of 10 means the student performed nearly all of the important reasoning independently, with only small amounts of appropriate support from the tutor.
+
+        2. tutor_encourage:
+        To what extent did the tutor encourage the student to actively attempt steps, explain their reasoning, show their work, or answer useful targeted questions?
+            A score of 1 means the tutor rarely or never asked the student to participate actively.
+            A score of 10 means the tutor consistently used productive questions and prompts that required the student to think and respond.
+
+        3. misunderstanding_identification:
+        To what extent did the tutor accurately identify and address the student's actual mathematical misunderstanding?
+            A score of 1 means the tutor completely missed, misunderstood, or incorrectly addressed the student's mathematical misunderstanding or difficulties.
+            A score of 10 means the tutor precisely identified the student's mathematical misunderstanding or difficulties and responded to them effectively.                    
+
+        4. tutor_hints:
+        To what extent did the tutor provide gradual hints of appropriate length and detail without revealing the full solution before the student had an opportunity to reason through it?        
+            A score of 1 means the tutor gave away the answer to the student before they figured it out or provided steps that left almost no reasoning for the student.
+            A score of 10 means the tutor provided only the amount of support needed at each point and allowed the student to perform the reasoning independently.
+
+        5. student_progress:
+        To what extent did the student make meaningful and mathematically correct progress in their understanding by the end of the conversation?
+            A score of 1 means the student showed little or no correct progress in their understanding.
+            A score of 10 means the student demonstrated substantial, correct progress and clearly improved their understanding.
+
+        Judge the tutor only based  on the conversation.
+        If a criterion can't be fully observed, use the available evidence, assign the most reasonable and justified score, and explain the uncertainty in the reason.
+
+        Conversation:
+        {transcript}
+
+        Return valid JSON with exactly these keys and structure.
+
+        Replace 0 with your actual whole-number score from 1 through 10.
+
+        {{
+            "student_independence": {{
+                "score": 0,
+                "reason": "Brief reasoning for the score."
+            }},
+            "tutor_encourage": {{
+                "score": 0,
+                "reason": "Brief reasoning for the score."
+            }},
+            "misunderstanding_identification": {{
+                "score": 0,
+                "reason": "Brief reasoning for the score."
+            }},
+            "tutor_hints": {{
+                "score": 0,
+                "reason": "Brief reasoning for the score."
+            }},
+            "student_progress": {{
+                "score": 0,
+                "reason": "Brief reasoning for the score."
+            }}
+        }}
+
+        Don't include extra explanation outside the JSON.
+
+    """
+
+    response = client.responses.create(
+            model=JUDGE_MODEL,
+            input=[
+                {
+                    "role": "system",
+                    "content": "You are a strict evaluator of math tutoring conversations.",
+                },
+                {
+                    "role": "user",
+                    "content": judge_prompt,
+                },
+            ],
+        )
+
+    judge_scores = json.loads(response.output_text.strip())
+
+    score_names = [
+        "student_independence",
+        "tutor_encourage",
+        "misunderstanding_identification",
+        "tutor_hints",
+        "student_progress",
+    ]
+
+    total_score = 0
+
+    for score_name in score_names:
+        score = int(judge_scores[score_name]["score"])
+
+        if score < 1 or score > 10:
+            raise ValueError(
+                f"Judge score for {score_name} must be between 1 and 10."
+            )
+
+        judge_scores[score_name]["score"] = score
+        total_score += score
+
+    judge_scores["total_score"] = total_score
+    judge_scores["average_score"] = round(
+        total_score / len(score_names),
+        2
+    )
+
+    return judge_scores
+
+
+
+
+
+
+
+def format_conversation_judge(conversation):
+    transcript = ""
+
+    for message in conversation:
+        transcript += f"{message['speaker']}: {message['content']} \n \n"
+
+    return transcript.strip()
+
+
+
+
+
+
+def run_conversation(sampled_conversation, generation_number, tutor_role_prompt, tutor_name, student_attributes, student_prompt, initial_student_message):
+
+    # student_attributes = label_student_attributes(sampled_conversation=sampled_conversation)
+
+    # student_prompt = create_student_prompt(
+    #         sampled_conversation=sampled_conversation,
+    #         student_attributes=student_attributes,
+    #     )
+
+
+    # initial_student_message = call_model(
+    #     role_prompt=student_prompt,
+    #     conversation=conversation,
+    #     speaker="student",
+    # )
+
 
     conversation = []
 
-    initial_student_message = call_model(
-        role_prompt=student_prompt,
-        conversation=conversation,
-        speaker="student",
-    )
 
     conversation.append(
         {
@@ -402,6 +673,7 @@ def run_conversation(sampled_conversation, generation_number):
     print("\n")
 
     print(f"Generation: {generation_number}")
+    print(f"Tutor type: {tutor_name}")
 
     print("Sampled real conversation ID:")
     for real_conversation in sampled_conversation:
@@ -410,9 +682,11 @@ def run_conversation(sampled_conversation, generation_number):
         )
 
 
+
     print("\nFull sampled real conversation:")
     print(format_style_conversation(sampled_conversation))
     print("\n")
+    
 
     print("Student Attributes:")
     print(
@@ -430,7 +704,7 @@ def run_conversation(sampled_conversation, generation_number):
 
     for rnd in range(NUM_ROUNDS):
         tutor_reply = call_model(
-            role_prompt=tutor_prompt,
+            role_prompt=tutor_role_prompt,
             conversation=conversation,
             speaker="tutor",
         )
@@ -461,7 +735,7 @@ def run_conversation(sampled_conversation, generation_number):
 
 
     final_tutor_reply = call_model(
-    role_prompt=tutor_prompt,
+    role_prompt=tutor_role_prompt,
     conversation=conversation,
     speaker="tutor"
     )
@@ -485,15 +759,33 @@ def run_conversation(sampled_conversation, generation_number):
             real_conversation["conversation_id"]
     )
 
+
+    judge_scores = judge_conversation(
+        conversation=conversation
+    )
     
+
+    print("Judge Scores:")
+    print(
+        json.dumps(
+            judge_scores,
+            indent=2,
+            ensure_ascii=False
+        )
+    )
+
+
+
     return {
     "generation_number": generation_number,
+    "tutor_name": tutor_name,
     "student_attributes": student_attributes,
     "learned_misunderstanding": student_attributes["math_misunderstanding"],
     "sampled_real_conversation_id": sampled_real_conversation_ids,
     "sampled_real_conversation_text": format_style_conversation(sampled_conversation),
     "sampled_real_student_messages": sampled_conversation,
     "conversation": conversation,
+    "judge_scores": judge_scores,
     }
 
 
@@ -528,23 +820,88 @@ all_results = []
 
 
 
-for generation_index in range(NUM_VARIATIONS):
+
+sampled_conversations = real_conversations_df.sample(
+    n=min(NUM_VARIATIONS, len(real_conversations_df)),
+    random_state=RAND,
+    replace=False,
+).to_dict("records")
+
+
+
+
+for generation_index, sampled_real_conversation in enumerate(sampled_conversations):
     generation_number = generation_index + 1
 
-    sample_seed = (RAND + generation_index)
+    sampled_conversation = [
+        sampled_real_conversation
+    ]
 
-    sampled_conversation = sample_real_student_conversation(
-        conversations=real_conversations_df,
-        random_state=sample_seed,
+    
+
+    student_attributes = label_student_attributes(
+        sampled_conversation=sampled_conversation
     )
 
-    result = run_conversation(
+    student_prompt = create_student_prompt(
         sampled_conversation=sampled_conversation,
-        generation_number=generation_number
+        student_attributes=student_attributes,
+    )
+
+    initial_student_message = call_model(
+        role_prompt=student_prompt,
+        conversation=[],
+        speaker="student",
+    )
+
+
+
+    tutor_result = run_conversation(
+        sampled_conversation=sampled_conversation,
+        generation_number=generation_number,
+        tutor_role_prompt=generic_tutor_prompt,
+        tutor_name="gpt_tutor",
+        student_attributes=student_attributes,
+        student_prompt=student_prompt,
+        initial_student_message=initial_student_message
+    )
+
+
+    base_tutor_result = run_conversation(
+        sampled_conversation=sampled_conversation,
+        generation_number=generation_number,
+        tutor_role_prompt=base_tutor_prompt,
+        tutor_name="gpt_base",
+        student_attributes=student_attributes,
+        student_prompt=student_prompt,
+        initial_student_message=initial_student_message
+    )
+
+    score_difference = (
+        tutor_result["judge_scores"]["total_score"]
+        - base_tutor_result["judge_scores"]["total_score"]
+    )
+
+    result = {
+        "generation_number": generation_number,
+        "gpt_tutor": tutor_result,
+        "gpt_base": base_tutor_result,
+        "score_difference": score_difference,
+        "check_passed": score_difference > 0,
+    }
+
+    print(
+        f"\nScore difference for generation {generation_number}: "
+        f"{score_difference}"
+    )
+
+    print(
+        f"Tutor is better than Base: "
+        f"{result['check_passed']}"
     )
 
     all_results.append(result)
-    total_conversations += 1
+    total_conversations += 2
 
 
 output = {
@@ -553,7 +910,8 @@ output = {
     "grade": TARGET_GRADE,
     "problem_id": TARGET_PROBLEM_ID,
     "num_rounds": NUM_ROUNDS,
-    "num_generated_conversations": len(all_results),
+    "num_generated_conversations": total_conversations,
+    "num_tutor_comparisons": len(all_results),    
     "results": all_results,
 }
 
