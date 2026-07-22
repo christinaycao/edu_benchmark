@@ -11,6 +11,12 @@ import pandas as pd
 
 
 
+from joblib import dump, load
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import GroupShuffleSplit
+
+
 
 load_dotenv()
 
@@ -57,23 +63,42 @@ generic_tutor_prompt = format_prompt + general_tutor
 
 
 
-problem = "Find the equation of the line which passes through A(-2,3) and parallel to 2x-3y+5=0."
+# problem = "Find the equation of the line which passes through A(-2,3) and parallel to 2x-3y+5=0."
 
 
 
 
 STUDENT_DATA_PATH = Path("valid_student_data.csv")
-TARGET_GRADE = 11
-TARGET_PROBLEM_ID = 1
+FINAL_DATA_PATH = Path("final_data.csv")
+PROBLEM_MAPPING_PATH = Path("problem_mapping.csv")
+PROBLEM_PART3_PATH = Path("problem_part3.csv")
+
+
+# TARGET_GRADE = 11
+# TARGET_PROBLEM_ID = 1
 NUM_STYLE_EXAMPLES = 1
-
-
-
 
 NUM_ROUNDS = 4
 CONVERSATION_ID_COLUMN = "conversation_id" 
 NUM_VARIATIONS = 5 
 RAND = 1
+
+
+# First time: train + save the regression !!
+RUN_RAW_CONVERSATION_JUDGE = True
+LOAD_SAVED_REGRESSION = False
+
+# Later runs: load saved regression 
+# RUN_RAW_CONVERSATION_JUDGE = False
+# LOAD_SAVED_REGRESSION = True
+
+
+RUN_GENERATED_CONVERSATIONS = True
+TEST_SPLIT = 0.2
+
+
+
+
 
 
 
@@ -91,12 +116,23 @@ def clean_student_message(message):
 
 
 
-def load_student_style_examples(csv_path, grade, problem_id):
+# def load_student_style_examples(csv_path, grade, problem_id):
 # def load_student_style_examples(csv_path, grade, num_examples=20):
+def load_student_style_examples(csv_path):
 
     data = pd.read_csv(csv_path)
 
-    required_columns = {"role", "message", "grade", "problem_id", CONVERSATION_ID_COLUMN}
+    required_columns = {
+        "role",
+        "message",
+        "grade",
+        "problem_id",
+        "session_id",
+        "treatment",
+        CONVERSATION_ID_COLUMN,
+    }
+
+
     # required_columns = {"role", "message", "grade"}
 
     missing_columns = required_columns - set(data.columns)
@@ -108,10 +144,9 @@ def load_student_style_examples(csv_path, grade, problem_id):
     
 
 
+
     student_data = data[
-        (data["role"].isin(["user", "assistant"]))
-        & (data["grade"] == grade)
-        & (data["problem_id"] == problem_id)
+    data["role"].isin(["user", "assistant"])
     ].copy()
 
 
@@ -133,10 +168,10 @@ def load_student_style_examples(csv_path, grade, problem_id):
 
   
 
+
     if student_data.empty:
         raise ValueError(
-            f"No student messages were found for grade {grade}, "
-            f"problem {problem_id}."
+            "No student messages were found."
     )
 
 
@@ -171,19 +206,25 @@ def load_student_style_examples(csv_path, grade, problem_id):
             continue
         
         
+        first_row = conversation_rows.iloc[0]
     
+        
         real_student_conversations.append(
             {
                 "conversation_id": str(conversation_id),
+                "grade": int(first_row["grade"]),
+                "problem_id": int(first_row["problem_id"]),
+                "session_id": int(first_row["session_id"]),
+                "treatment": str(first_row["treatment"]),
                 "messages": messages,
             }
         )
-        
 
+
+    
     if not real_student_conversations:
         raise ValueError(
-            f"No student conversations were found for grade {grade}, "
-            f"problem {problem_id}."
+            "No student conversations were found."
         )
 
     return real_student_conversations
@@ -194,21 +235,22 @@ def load_student_style_examples(csv_path, grade, problem_id):
 
 
 
+
 real_student_conversations = load_student_style_examples(
-    csv_path=STUDENT_DATA_PATH,
-    grade=TARGET_GRADE,
-    problem_id=TARGET_PROBLEM_ID
+    csv_path=STUDENT_DATA_PATH
 )
 
 
 
 def sample_real_student_conversation(conversations, random_state):
+    conversations_df = pd.DataFrame(conversations)
+
     sample_size = min(
         NUM_STYLE_EXAMPLES,
-        len(conversations),
+        len(conversations_df),
     )
 
-    return conversations.sample(
+    return conversations_df.sample(
         n=sample_size,
         random_state=random_state,
         replace=False,
@@ -259,7 +301,6 @@ def format_style_conversation(sampled_conversation):
 
 
 
-        # The following are key attributes of the student that you should use to//that you should try and mimic
 
 
 def label_student_attributes(sampled_conversation):
@@ -311,7 +352,7 @@ def label_student_attributes(sampled_conversation):
 
 
 
-def create_student_prompt(sampled_conversation, student_attributes):
+def create_student_prompt(sampled_conversation, student_attributes, current_problem):
     style_examples_text  = format_style_conversation(sampled_conversation)
 
     student_attributes_text = json.dumps(
@@ -330,7 +371,7 @@ def create_student_prompt(sampled_conversation, student_attributes):
 
         
         The assigned problem you are solving is:
-        {problem}
+        {current_problem}
 
 
         The following are key attributes of the real student that you should mimic:
@@ -347,7 +388,7 @@ def create_student_prompt(sampled_conversation, student_attributes):
 
 
 
-def call_model(role_prompt, conversation, speaker):
+def call_model(role_prompt, conversation, speaker, current_problem):
     transcript = ""
 
     for message in conversation:
@@ -357,7 +398,7 @@ def call_model(role_prompt, conversation, speaker):
     user_message = f"""
 
     The assigned problem is:
-    {problem}
+    {current_problem}
 
     
     Here is the conversation so far:
@@ -389,7 +430,80 @@ def call_model(role_prompt, conversation, speaker):
 
 
 
-def load_correct_answer(csv_path, grade, problem_id):
+def load_problem(csv_path, grade, problem_id, session_id):
+
+    data = pd.read_csv(csv_path)
+
+
+    matching_prompts = data[
+    (data["role"] == "system")
+    & (data["grade"] == grade)
+    & (data["problem_id"] == problem_id)
+    & (data["session_id"] == session_id)
+    ][["message", "treatment"]].dropna(
+        subset=["message"]
+    ).drop_duplicates()
+
+    if matching_prompts.empty:
+        raise ValueError(
+            f"No system prompt was found for grade {grade}, problem {problem_id}."
+        )
+
+
+    for _, row in matching_prompts.iterrows():
+        prompt = str(row["message"])
+        treatment = str(row["treatment"])
+
+        if treatment == "aug":
+            start_text = "the problem the student is solving is"
+            end_text = "You should help the student solve this problem."
+
+            if start_text in prompt and end_text in prompt:
+                problem_text = prompt.split(start_text, 1)[1]
+
+                if ":" in problem_text:
+                    problem_text = problem_text.split(":", 1)[1]
+
+                problem = (
+                    problem_text
+                    .split(end_text, 1)[0]
+                    .strip()
+                    .strip('"')
+                    .strip()
+                )
+
+                if problem:
+                    return problem
+
+        elif treatment == "vanilla":
+            start_text = "Now you can help with this problem:"
+
+            if start_text in prompt:
+                problem = (
+                    prompt
+                    .split(start_text, 1)[1]
+                    .strip()
+                    .strip('"')
+                    .strip()
+                )
+
+                if problem:
+                    return problem
+
+    raise ValueError(
+        f"The problem could not be extracted for grade {grade}, problem {problem_id}."
+    )
+
+
+
+
+
+
+
+
+
+
+def load_solution_ref(csv_path, grade, problem_id, session_id):
 
     data = pd.read_csv(csv_path)
 
@@ -397,42 +511,89 @@ def load_correct_answer(csv_path, grade, problem_id):
         (data["role"] == "system")
         & (data["grade"] == grade)
         & (data["problem_id"] == problem_id)
+        & (data["session_id"] == session_id)
         & (data["treatment"] == "aug")
     ]["message"].dropna().drop_duplicates()
 
     if matching_prompts.empty:
         raise ValueError(
-            f"No augmented system prompt was found for grade {grade}, problem {problem_id}."
+            f"No augmented system prompt was found for session {session_id}, grade {grade}, problem {problem_id}."
         )
 
-    start_text = "The correct solution is"
-    end_text = ". To get this solution"
+    possible_start_texts = [
+        "A few notes about this problem and its solution:",
+        "The correct solution is",
+    ]
 
     for prompt in matching_prompts:
         prompt = str(prompt)
 
-        if start_text in prompt and end_text in prompt:
-            correct_answer = (
-                prompt
-                .split(start_text, 1)[1]
-                .split(end_text, 1)[0]
-                .strip()
-            )
+        for start_text in possible_start_texts:
+            if start_text in prompt:
+                solution_reference = (
+                    prompt
+                    .split(start_text, 1)[1]
+                    .strip()
+                    .strip('"')
+                    .strip()
+                )
 
-            return correct_answer
+                if solution_reference:
+                    return solution_reference
 
     raise ValueError(
-        f"The correct solution could not be extracted for grade {grade}, problem {problem_id}."
+        f"Solution information could not be extracted for session {session_id}, grade {grade}, problem {problem_id}."
     )
 
 
 
 
-correct_answer = load_correct_answer(
-    csv_path=STUDENT_DATA_PATH,
-    grade=TARGET_GRADE,
-    problem_id=TARGET_PROBLEM_ID
-)
+
+# def load_correct_answer(csv_path, grade, problem_id, session_id):
+
+#     data = pd.read_csv(csv_path)
+
+#     matching_prompts = data[
+#         (data["role"] == "system")
+#         & (data["grade"] == grade)
+#         & (data["problem_id"] == problem_id)
+#         & (data["session_id"] == session_id)
+#         & (data["treatment"] == "aug")
+#     ]["message"].dropna().drop_duplicates()
+
+#     if matching_prompts.empty:
+#         raise ValueError(
+#             f"No augmented system prompt was found for grade {grade}, problem {problem_id}."
+#         )
+
+#     start_text = "The correct solution is"
+#     end_text = ". To get this solution"
+
+#     for prompt in matching_prompts:
+#         prompt = str(prompt)
+
+#         if start_text in prompt and end_text in prompt:
+#             correct_answer = (
+#                 prompt
+#                 .split(start_text, 1)[1]
+#                 .split(end_text, 1)[0]
+#                 .strip()
+#             )
+
+#             return correct_answer
+
+#     raise ValueError(
+#         f"The correct solution could not be extracted for grade {grade}, problem {problem_id}."
+#     )
+
+
+
+
+# correct_answer = load_correct_answer(
+#     csv_path=STUDENT_DATA_PATH,
+#     grade=TARGET_GRADE,
+#     problem_id=TARGET_PROBLEM_ID
+# )
 
 
 
@@ -442,71 +603,72 @@ correct_answer = load_correct_answer(
 
 
 
-def load_solution_steps(csv_path, grade, problem_id):
+# def load_solution_steps(csv_path, grade, problem_id, session_id):
 
-    data = pd.read_csv(csv_path)
+#     data = pd.read_csv(csv_path)
 
-    matching_prompts = data[
-        (data["role"] == "system")
-        & (data["grade"] == grade)
-        & (data["problem_id"] == problem_id)
-        & (data["treatment"] == "aug")
-    ]["message"].dropna().drop_duplicates()
+#     matching_prompts = data[
+#         (data["role"] == "system")
+#         & (data["grade"] == grade)
+#         & (data["problem_id"] == problem_id)
+#         & (data["session_id"] == session_id)
+#         & (data["treatment"] == "aug")
+#     ]["message"].dropna().drop_duplicates()
 
-    if matching_prompts.empty:
-        raise ValueError(
-            f"No augmented system prompt was found for grade {grade}, problem {problem_id}."
-        )
+#     if matching_prompts.empty:
+#         raise ValueError(
+#             f"No augmented system prompt was found for grade {grade}, problem {problem_id}."
+#         )
 
-    start_text = "To get this solution, the student should"
-    end_text = "\n*"
+#     start_text = "To get this solution, the student should"
+#     end_text = "\n*"
 
-    for prompt in matching_prompts:
-        prompt = str(prompt)
+#     for prompt in matching_prompts:
+#         prompt = str(prompt)
 
-        if start_text in prompt:
-            solution_steps = prompt.split(start_text, 1)[1]
+#         if start_text in prompt:
+#             solution_steps = prompt.split(start_text, 1)[1]
 
-            if end_text in solution_steps:
-                solution_steps = solution_steps.split(end_text, 1)[0]
+#             if end_text in solution_steps:
+#                 solution_steps = solution_steps.split(end_text, 1)[0]
 
-            return solution_steps.strip()
+#             return solution_steps.strip()
 
-    raise ValueError(
-        f"The solution steps could not be extracted for grade {grade}, problem {problem_id}."
-    )
-
-
-
-
-solution_steps = load_solution_steps(
-    csv_path=STUDENT_DATA_PATH,
-    grade=TARGET_GRADE,
-    problem_id=TARGET_PROBLEM_ID
-)
+#     raise ValueError(
+#         f"The solution steps could not be extracted for grade {grade}, problem {problem_id}."
+#     )
 
 
 
+
+# solution_steps = load_solution_steps(
+#     csv_path=STUDENT_DATA_PATH,
+#     grade=TARGET_GRADE,
+#     problem_id=TARGET_PROBLEM_ID
+# )
 
 
 
 
 
 
-def judge_conversation(conversation):
+
+
+
+def judge_conversation(conversation, current_problem, current_solution_ref):
+    
     transcript = format_conversation_judge(conversation)
+
+
 
     judge_prompt = f"""
         You are evaluating the quality of an AI tutor in a simulated math tutoring conversation.
 
         The assigned problem is:
-        {problem}
-
-        The correct answer is:
-        {correct_answer}
-
-        The expected solution process is:
-        {solution_steps}
+        {current_problem}
+        
+        The reference solution information is:
+        {current_solution_ref}
 
 
         Score the conversation between the tutor model and student on each of the following five criteria from 1 to 10.
@@ -643,8 +805,409 @@ def format_conversation_judge(conversation):
 
 
 
-def run_conversation(sampled_conversation, generation_number, tutor_role_prompt, tutor_name, student_attributes, student_prompt, initial_student_message):
 
+def load_raw_student_conversations(csv_path):
+
+    data = pd.read_csv(csv_path)
+
+    required_columns = {
+        "role",
+        "message",
+        "conversation_id",
+        "username",
+        "grade",
+        "problem_id",
+        "session_id",
+        "treatment",
+    }
+
+    missing_columns = required_columns - set(data.columns)
+
+    if missing_columns:
+        raise ValueError(
+            f"The CSV is missing these columns: {sorted(missing_columns)}"
+        )
+
+    data = data[
+        data["role"].isin(["user", "assistant"])
+    ].copy()
+
+    data = data.dropna(
+        subset=[
+            "message",
+            "conversation_id",
+            "username",
+            "grade",
+            "problem_id",
+            "session_id",
+            "treatment",
+        ]
+    )
+
+    data["message"] = (
+        data["message"]
+        .apply(clean_student_message)
+    )
+
+    data = data[
+        data["message"].str.len() > 0
+    ].drop_duplicates(
+        subset=[
+            "conversation_id", "role", "message"]
+    )
+
+    raw_student_conversations = []
+
+    for conversation_id, conversation_rows in data.groupby("conversation_id", sort=False):
+        first_row = conversation_rows.iloc[0]
+        conversation = []
+
+        for _, row in conversation_rows.iterrows():
+            if row["role"] == "user":
+                speaker = "student"
+            else:
+                speaker = "tutor"
+
+            conversation.append(
+                {
+                    "speaker": speaker,
+                    "content": row["message"],
+                }
+            )
+
+        raw_student_conversations.append(
+            {
+                "conversation_id": str(conversation_id),
+                "username": str(first_row["username"]).strip(),
+                "grade": int(first_row["grade"]),
+                "problem_id": int(first_row["problem_id"]),
+                "session_id": int(first_row["session_id"]),
+                "treatment": str(first_row["treatment"]),
+                "conversation": conversation,
+            }
+        )
+
+    return raw_student_conversations
+
+
+
+
+
+
+def add_exam_grades(raw_student_conversations, problem_mapping_path, problem_part3_path):
+
+    raw_student_conversations = pd.DataFrame(raw_student_conversations)
+    problem_mapping = pd.read_csv(problem_mapping_path)
+    problem_part3 = pd.read_csv(problem_part3_path)
+
+    print(problem_part3["Score"].describe())
+    print(sorted(problem_part3["Score"].dropna().unique()))
+
+    raw_student_conversations["username"] = (
+        raw_student_conversations["username"]
+        .astype(str)
+        .str.strip()
+        .str.replace(r"\.0$", "", regex=True)
+    )
+
+    problem_part3["Student ID"] = (
+        problem_part3["Student ID"]
+        .astype(str)
+        .str.strip()
+        .str.replace(r"\.0$", "", regex=True)
+    )
+
+    raw_student_conversations["part2"] = (
+        "s"
+        + raw_student_conversations["session_id"].astype(str)
+        + "_"
+        + raw_student_conversations["grade"].astype(str)
+        + "_"
+        + raw_student_conversations["problem_id"].astype(str)
+    )
+
+    raw_student_conversations = raw_student_conversations.merge(
+        problem_mapping,
+        on="part2",
+        how="left",
+        validate="many_to_one",
+    )
+
+    raw_student_conversations = raw_student_conversations.dropna(
+        subset=["part3"]
+    )
+
+    raw_student_conversations = raw_student_conversations.merge(
+        problem_part3,
+        left_on=["username", "part3"],
+        right_on=["Student ID", "Problem"],
+        how="left",
+        validate="many_to_one",
+    )
+
+    raw_student_conversations = raw_student_conversations.dropna(
+        subset=["Score"]
+    )
+
+    treatment_names = {
+        "aug": "augmented",
+        "vanilla": "vanilla",
+    }
+
+    raw_student_conversations["expected_treatment"] = (
+        raw_student_conversations["treatment"]
+        .map(treatment_names)
+    )
+
+    treatment_mismatch = raw_student_conversations[
+        raw_student_conversations["expected_treatment"]
+        != raw_student_conversations["Treatment arm"]
+    ]
+
+    if not treatment_mismatch.empty:
+        raise ValueError(
+            "The raw conversation treatment does not match the grade-data treatment for "
+            f"{len(treatment_mismatch)} conversations."
+        )
+
+    return raw_student_conversations
+
+
+
+
+
+def flatten_judge_scores(judge_scores):
+
+    return {
+        "student_independence": judge_scores["student_independence"]["score"],
+        "tutor_encourage": judge_scores["tutor_encourage"]["score"],
+        "misunderstanding_identification": judge_scores["misunderstanding_identification"]["score"],
+        "tutor_hints": judge_scores["tutor_hints"]["score"],
+        "student_progress": judge_scores["student_progress"]["score"],
+        "total_score": judge_scores["total_score"],
+        "average_score": judge_scores["average_score"]
+    }
+
+
+
+
+
+def judge_raw_conversations(raw_student_conversations):
+
+    judge_results = []
+
+    for conversation_number, raw_student_conversation in enumerate(
+        raw_student_conversations.to_dict("records"),
+        start=1,
+    ):
+        current_problem = load_problem(
+            csv_path=STUDENT_DATA_PATH,
+            grade=raw_student_conversation["grade"],
+            problem_id=raw_student_conversation["problem_id"],
+            session_id=raw_student_conversation["session_id"],
+        )
+
+        # current_correct_answer = load_correct_answer(
+        #     csv_path=STUDENT_DATA_PATH,
+        #     grade=raw_student_conversation["grade"],
+        #     problem_id=raw_student_conversation["problem_id"],
+        #     session_id=raw_student_conversation["session_id"],
+        # )
+
+        # current_solution_steps = load_solution_steps(
+        #     csv_path=STUDENT_DATA_PATH,
+        #     grade=raw_student_conversation["grade"],
+        #     problem_id=raw_student_conversation["problem_id"],
+        #     session_id=raw_student_conversation["session_id"],
+        # )
+
+        current_solution_ref = load_solution_ref(
+            csv_path=STUDENT_DATA_PATH,
+            grade=raw_student_conversation["grade"],
+            problem_id=raw_student_conversation["problem_id"],
+            session_id=raw_student_conversation["session_id"],
+        )
+
+        # judge_scores = judge_conversation(
+        #     conversation=raw_student_conversation["conversation"],
+        #     current_problem=current_problem,
+        #     current_correct_answer=current_correct_answer,
+        #     current_solution_steps=current_solution_steps,
+        # )
+
+
+        judge_scores = judge_conversation(
+            conversation=raw_student_conversation["conversation"],
+            current_problem=current_problem,
+            current_solution_ref=current_solution_ref,
+        )
+
+        judge_result = {
+            "conversation_id": raw_student_conversation["conversation_id"],
+            "username": raw_student_conversation["username"],
+            "grade": raw_student_conversation["grade"],
+            "problem_id": raw_student_conversation["problem_id"],
+            "session_id": raw_student_conversation["session_id"],
+            "part2": raw_student_conversation["part2"],
+            "part3": raw_student_conversation["part3"],
+            "treatment": raw_student_conversation["treatment"],
+            "exam_score": raw_student_conversation["Score"],
+            "gpa_prev": raw_student_conversation["gpa_prev"],
+            "class": raw_student_conversation["Class"],
+            "treatment_arm": raw_student_conversation["Treatment arm"],
+            "judge_scores": judge_scores,
+        }
+
+        judge_result.update(
+            flatten_judge_scores(judge_scores)
+        )
+
+        judge_results.append(judge_result)
+
+        print(
+            f"Judged raw conversation {conversation_number} of "
+            f"{len(raw_student_conversations)}"
+        )
+
+    return judge_results
+
+
+
+
+
+
+
+
+
+def fit_grade_regression(judge_results):
+
+    judge_results = pd.DataFrame(judge_results)
+
+    score_names = [
+        "student_independence",
+        "tutor_encourage",
+        "misunderstanding_identification",
+        "tutor_hints",
+        "student_progress"
+    ]
+
+    X = judge_results[score_names]
+    Y = judge_results["exam_score"]
+    groups = judge_results["username"]
+
+    if judge_results["username"].nunique() < 2:
+        raise ValueError(
+            "Need at least two students."
+        )
+
+    split = GroupShuffleSplit(
+        n_splits=1,
+        test_size=TEST_SPLIT,
+        random_state=RAND,
+    )
+
+    train_index, test_index = next(
+        split.split(X, Y, groups=groups)
+    )
+
+    X_train = X.iloc[train_index]
+    X_test = X.iloc[test_index]
+    Y_train = Y.iloc[train_index]
+    Y_test = Y.iloc[test_index]
+
+    regress_model = LinearRegression()
+    regress_model.fit(X_train, Y_train)
+
+    train_predictions = regress_model.predict(X_train)
+    test_predictions = regress_model.predict(X_test)
+
+    regression_results = {
+        "features": score_names,
+        "target": "Part Three per-problem Score",
+        "num_rows": len(judge_results),
+        "num_students": int(judge_results["username"].nunique()),
+        "num_train_rows": len(X_train),
+        "num_test_rows": len(X_test),
+        "intercept": float(regress_model.intercept_),
+        "coefficients": {
+            score_name: float(coefficient)
+            for score_name, coefficient in zip(
+                score_names,
+                regress_model.coef_,
+            )
+        },
+        "train_r2": float(r2_score(Y_train, train_predictions)),
+        "test_r2": float(r2_score(Y_test, test_predictions)),
+        "test_absolute_error": float(mean_absolute_error(Y_test, test_predictions)),
+        "test_rmse": float(mean_squared_error(Y_test, test_predictions) ** 0.5),
+    }
+
+    judge_results["predicted_score"] = regress_model.predict(X)
+
+    return regress_model, regression_results, judge_results
+
+
+
+
+def summarize_treatments(judge_results):
+
+    judge_results = pd.DataFrame(judge_results)
+
+    treatment_summary = (
+        judge_results
+        .groupby("treatment")[
+            [
+                "student_independence",
+                "tutor_encourage",
+                "misunderstanding_identification",
+                "tutor_hints",
+                "student_progress",
+                "total_score",
+                "average_score",
+                "exam_score"
+            ]
+        ]
+        .agg(["mean", "std", "count"])
+    )
+
+    return treatment_summary
+
+
+
+
+output_directory = Path("outputs")
+output_directory.mkdir(exist_ok=True)
+
+regress_model_path = (
+    output_directory / "grade_regress_model.joblib"
+)
+
+regress_model = None
+
+if LOAD_SAVED_REGRESSION:
+    if not regress_model_path.exists():
+        raise FileNotFoundError(
+            f"No saved regression model was found at {regress_model_path}."
+        )
+
+    regress_model = load(regress_model_path)
+
+    print(
+        f"\nLoaded saved regression model from {regress_model_path}"
+    )
+
+
+
+def run_conversation(sampled_conversation,
+                     generation_number,
+                     tutor_role_prompt,
+                     tutor_name,
+                     student_attributes,
+                     student_prompt,
+                     initial_student_message,
+                     current_problem,
+                     current_solution_ref):
+    
     # student_attributes = label_student_attributes(sampled_conversation=sampled_conversation)
 
     # student_prompt = create_student_prompt(
@@ -707,6 +1270,7 @@ def run_conversation(sampled_conversation, generation_number, tutor_role_prompt,
             role_prompt=tutor_role_prompt,
             conversation=conversation,
             speaker="tutor",
+            current_problem=current_problem
         )
 
         conversation.append(
@@ -722,6 +1286,7 @@ def run_conversation(sampled_conversation, generation_number, tutor_role_prompt,
             role_prompt=student_prompt,
             conversation=conversation,
             speaker="student",
+            current_problem=current_problem
         )
         
         conversation.append(
@@ -737,7 +1302,8 @@ def run_conversation(sampled_conversation, generation_number, tutor_role_prompt,
     final_tutor_reply = call_model(
     role_prompt=tutor_role_prompt,
     conversation=conversation,
-    speaker="tutor"
+    speaker="tutor",
+    current_problem=current_problem
     )
 
 
@@ -760,10 +1326,56 @@ def run_conversation(sampled_conversation, generation_number, tutor_role_prompt,
     )
 
 
+
+    # judge_scores = judge_conversation(
+    #     conversation=conversation,
+    #     current_problem=current_problem,
+    #     current_correct_answer=current_correct_answer,
+    #     current_solution_steps=current_solution_steps,
+    # )
+
     judge_scores = judge_conversation(
-        conversation=conversation
+        conversation=conversation,
+        current_problem=current_problem,
+        current_solution_ref=current_solution_ref,
     )
     
+
+
+    predicted_exam_score = None
+
+    if regress_model is not None:
+        prediction_data = pd.DataFrame(
+            [flatten_judge_scores(judge_scores)]
+        )[
+            [
+                "student_independence",
+                "tutor_encourage",
+                "misunderstanding_identification",
+                "tutor_hints",
+                "student_progress",
+            ]
+        ]
+
+        predicted_exam_score = float(
+            regress_model.predict(prediction_data)[0]
+        )
+
+        # predicted_exam_score = max(
+        #     0.0,
+        #     min(1.0, predicted_exam_score)
+        # )
+
+
+        # check here after !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+        
+
+    
+
+
+
+
 
     print("Judge Scores:")
     print(
@@ -777,19 +1389,27 @@ def run_conversation(sampled_conversation, generation_number, tutor_role_prompt,
 
 
     return {
-    "generation_number": generation_number,
-    "tutor_name": tutor_name,
-    "student_attributes": student_attributes,
-    "learned_misunderstanding": student_attributes["math_misunderstanding"],
-    "sampled_real_conversation_id": sampled_real_conversation_ids,
-    "sampled_real_conversation_text": format_style_conversation(sampled_conversation),
-    "sampled_real_student_messages": sampled_conversation,
-    "conversation": conversation,
-    "judge_scores": judge_scores,
+        "generation_number": generation_number,
+        "tutor_name": tutor_name,
+        "grade": sampled_conversation[0]["grade"],
+        "problem_id": sampled_conversation[0]["problem_id"],
+        "problem": current_problem,
+        "session_id": sampled_conversation[0]["session_id"],
+        # "correct_answer": current_correct_answer,
+        # "solution_steps": current_solution_steps,
+        "solution_reference": current_solution_ref,
+        "student_attributes": student_attributes,
+        "learned_misunderstanding": student_attributes["math_misunderstanding"],
+        "sampled_real_conversation_id": sampled_real_conversation_ids,
+        "sampled_real_conversation_text": format_style_conversation(sampled_conversation),
+        "sampled_real_student_messages": sampled_conversation,
+        "conversation": conversation,
+        "judge_scores": judge_scores,
+        "predicted_exam_score": predicted_exam_score,
     }
 
 
- 
+
 
 
 
@@ -804,114 +1424,459 @@ def run_conversation(sampled_conversation, generation_number, tutor_role_prompt,
 
 real_conversations_df = pd.DataFrame(real_student_conversations)
 
-output_directory = Path("outputs")
-output_directory.mkdir(exist_ok=True)
 
 
-output_filename = "attribute_student_generations.json"
+
+
+if RUN_RAW_CONVERSATION_JUDGE:
+    raw_student_conversations = load_raw_student_conversations(
+        csv_path=STUDENT_DATA_PATH
+    )
+
+    raw_student_conversations = add_exam_grades(
+        raw_student_conversations=raw_student_conversations,
+        problem_mapping_path=PROBLEM_MAPPING_PATH,
+        problem_part3_path=PROBLEM_PART3_PATH,
+    )
+
+
+    raw_judge_results = judge_raw_conversations(
+        raw_student_conversations=raw_student_conversations
+    )
+
+    regress_model, regression_results, raw_judge_results_df = fit_grade_regression(
+        judge_results=raw_judge_results
+    )
+
+    treatment_summary = summarize_treatments(
+        judge_results=raw_judge_results
+    )
+
+
+
+
+    treatment_means = (
+    raw_judge_results_df.groupby("treatment")[
+        [
+            "student_independence",
+            "tutor_encourage",
+            "misunderstanding_identification",
+            "tutor_hints",
+            "student_progress",
+            "total_score",
+            "average_score",
+            "exam_score",
+            "predicted_score",
+        ]
+    ]
+    .mean()
+)
+
+    if "aug" in treatment_means.index and "vanilla" in treatment_means.index:
+        raw_tutor_gap = (
+            treatment_means.loc["aug"]
+            - treatment_means.loc["vanilla"]
+        )
+
+        print("\nRaw augmented - vanilla:")
+        print(raw_tutor_gap)
+
+        if raw_tutor_gap["average_score"] > 0:
+            print(
+                "\nThe judge scores the augmented tutor higher "
+                "than the vanilla tutor on average."
+            )
+        elif raw_tutor_gap["average_score"] < 0:
+            print(
+                "\nThe judge scores the vanilla tutor higher "
+                "than the augmented tutor on average."
+            )
+        else:
+            print(
+                "\nThe judge gives the augmented and vanilla "
+                "tutors the same average score."
+            )
+    else:
+        raw_tutor_gap = None
+        print(
+            "\nCould not calculate the augmented-versus-vanilla gap "
+            "because both treatment groups were not present."
+        )
+
+
+
+
+    raw_judge_results_path = (output_directory / "raw_conversation_judge_scores.csv")
+    regression_results_path = (output_directory / "grade_regression_results.json")
+    treatment_summary_path = (output_directory / "raw_tutor_gap_summary.csv")
+
+
+    raw_judge_results_df.drop(
+        columns=["judge_scores"],
+        errors="ignore",
+    ).to_csv(
+        raw_judge_results_path,
+        index=False,
+    )
+
+    with regression_results_path.open("w", encoding="utf-8") as file:
+        json.dump(
+            regression_results,
+            file,
+            indent=2,
+            ensure_ascii=False,
+        )
+
+    treatment_summary.to_csv(
+        treatment_summary_path
+    )
+
+    dump(
+        regress_model ,
+        regress_model_path,
+    )
+
+    print("\nRaw tutor gap summary:")
+    print(treatment_summary)
+
+    print("\nGrade regression results:")
+    print(
+        json.dumps(
+            regression_results,
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
+
+
+
+
+
+
+output_filename = "regression_students.json"
 
 
 
 
 total_conversations = 0
 all_results = []
+generated_results = []
 
 
 
 
+if RUN_GENERATED_CONVERSATIONS:
+    # sampled_conversations = real_conversations_df.sample(
+    #     n=min(NUM_VARIATIONS, len(real_conversations_df)),
+    #     random_state=RAND,
+    #     replace=False,
+    # ).to_dict("records")
 
+    problem_mapping = pd.read_csv(PROBLEM_MAPPING_PATH)
 
-sampled_conversations = real_conversations_df.sample(
-    n=min(NUM_VARIATIONS, len(real_conversations_df)),
-    random_state=RAND,
-    replace=False,
-).to_dict("records")
+    valid_part2_problems = set(
+        problem_mapping
+        .dropna(subset=["part3"])["part2"]
+    )
 
+    real_conversations_df["part2"] = (
+        "s"
+        + real_conversations_df["session_id"].astype(str)
+        + "_"
+        + real_conversations_df["grade"].astype(str)
+        + "_"
+        + real_conversations_df["problem_id"].astype(str)
+    )
 
+    generation_conversations_df = real_conversations_df[
+        real_conversations_df["part2"].isin(valid_part2_problems)
+    ].copy()
+    
+    # samples one real student conversation per unique problem for the purpose of generations!!
+    # so does one sampled student conversation for each of the unique problems.
 
-
-for generation_index, sampled_real_conversation in enumerate(sampled_conversations):
-    generation_number = generation_index + 1
-
-    sampled_conversation = [
-        sampled_real_conversation
-    ]
-
+    sampled_conversations = (
+        generation_conversations_df
+        .groupby(
+            ["session_id", "grade", "problem_id"],
+            group_keys=False
+        )
+        .sample(
+            n=1,
+            random_state=RAND
+        )
+        .to_dict("records")
+    )
     
 
-    student_attributes = label_student_attributes(
-        sampled_conversation=sampled_conversation
-    )
-
-    student_prompt = create_student_prompt(
-        sampled_conversation=sampled_conversation,
-        student_attributes=student_attributes,
-    )
-
-    initial_student_message = call_model(
-        role_prompt=student_prompt,
-        conversation=[],
-        speaker="student",
-    )
 
 
+    for generation_index, sampled_real_conversation in enumerate(sampled_conversations):
+        generation_number = generation_index + 1
 
-    tutor_result = run_conversation(
-        sampled_conversation=sampled_conversation,
-        generation_number=generation_number,
-        tutor_role_prompt=generic_tutor_prompt,
-        tutor_name="gpt_tutor",
-        student_attributes=student_attributes,
-        student_prompt=student_prompt,
-        initial_student_message=initial_student_message
-    )
+        sampled_conversation = [
+            sampled_real_conversation
+        ]
+
+        current_grade = sampled_real_conversation["grade"]
+        current_problem_id = sampled_real_conversation["problem_id"]
+        current_session_id = sampled_real_conversation["session_id"]
 
 
-    base_tutor_result = run_conversation(
+        current_problem = load_problem(
+            csv_path=STUDENT_DATA_PATH,
+            grade=current_grade,
+            problem_id=current_problem_id,
+            session_id=current_session_id,
+        )
+
+        # current_correct_answer = load_correct_answer(
+        #     csv_path=STUDENT_DATA_PATH,
+        #     grade=current_grade,
+        #     problem_id=current_problem_id,
+        #     session_id=current_session_id,
+        # )
+
+        # current_solution_steps = load_solution_steps(
+        #     csv_path=STUDENT_DATA_PATH,
+        #     grade=current_grade,
+        #     problem_id=current_problem_id,
+        #     session_id=current_session_id,
+        # )
+
+        current_solution_ref = load_solution_ref(
+            csv_path=STUDENT_DATA_PATH,
+            grade=current_grade,
+            problem_id=current_problem_id,
+            session_id=current_session_id,
+        )
+
+
+        student_attributes = label_student_attributes(
+            sampled_conversation=sampled_conversation
+        )
+
+
+
+        student_prompt = create_student_prompt(
+            sampled_conversation=sampled_conversation,
+            student_attributes=student_attributes,
+            current_problem=current_problem,
+        )
+
+        initial_student_message = call_model(
+            role_prompt=student_prompt,
+            conversation=[],
+            speaker="student",
+            current_problem=current_problem
+        )
+
+
+
+
+        tutor_result = run_conversation(
+            sampled_conversation=sampled_conversation,
+            generation_number=generation_number,
+            tutor_role_prompt=generic_tutor_prompt,
+            tutor_name="gpt_tutor",
+            student_attributes=student_attributes,
+            student_prompt=student_prompt,
+            initial_student_message=initial_student_message,
+            current_problem=current_problem,
+            # current_correct_answer=current_correct_answer,
+            # current_solution_steps=current_solution_steps,
+            current_solution_ref=current_solution_ref,
+        )
+
+
+
+
+        base_tutor_result = run_conversation(
         sampled_conversation=sampled_conversation,
         generation_number=generation_number,
         tutor_role_prompt=base_tutor_prompt,
         tutor_name="gpt_base",
         student_attributes=student_attributes,
         student_prompt=student_prompt,
-        initial_student_message=initial_student_message
+        initial_student_message=initial_student_message,
+        current_problem=current_problem,
+        # current_correct_answer=current_correct_answer,
+        # current_solution_steps=current_solution_steps,
+        current_solution_ref=current_solution_ref,
+        )
+
+
+
+
+
+        for generated_result in [tutor_result, base_tutor_result]:
+            generated_results.append(
+                {
+                    "generation_number": generation_number,
+                    "session_id": generated_result["session_id"],
+                    "grade": generated_result["grade"],
+                    "problem_id": generated_result["problem_id"],
+                    "tutor_name": generated_result["tutor_name"],
+                    "total_score": generated_result["judge_scores"]["total_score"],
+                    "average_score": generated_result["judge_scores"]["average_score"],
+                    "student_independence": generated_result["judge_scores"]["student_independence"]["score"],
+                    "tutor_encourage": generated_result["judge_scores"]["tutor_encourage"]["score"],
+                    "misunderstanding_identification": generated_result["judge_scores"]["misunderstanding_identification"]["score"],
+                    "tutor_hints": generated_result["judge_scores"]["tutor_hints"]["score"],
+                    "student_progress": generated_result["judge_scores"]["student_progress"]["score"],
+                    "predicted_exam_score": generated_result["predicted_exam_score"],
+                }
+            )
+
+
+
+
+        score_difference = (
+            tutor_result["judge_scores"]["total_score"]
+            - base_tutor_result["judge_scores"]["total_score"]
+        )
+
+        predicted_exam_difference = (
+            tutor_result["predicted_exam_score"]
+            - base_tutor_result["predicted_exam_score"]
+        )
+
+        result = {
+            "generation_number": generation_number,
+            "gpt_tutor": tutor_result,
+            "gpt_base": base_tutor_result,
+            "score_difference": score_difference,
+            "predicted_exam_difference": predicted_exam_difference,
+            "check_passed": score_difference > 0,
+            "predicted_exam_check_passed": predicted_exam_difference > 0,
+        }
+
+        print(
+            f"\nScore difference for generation {generation_number}: "
+            f"{score_difference}"
+        )
+
+        print(
+            f"Tutor is better than Base: {result['check_passed']}"
+        )
+
+        print(
+            f"Tutor has higher predicted exam performance: "
+            f"{result['predicted_exam_check_passed']}"
+        )
+
+
+        all_results.append(result)
+        total_conversations += 2
+
+
+
+
+
+
+
+
+
+
+
+if generated_results:
+    generated_results_df = pd.DataFrame(
+        generated_results
     )
 
-    score_difference = (
-        tutor_result["judge_scores"]["total_score"]
-        - base_tutor_result["judge_scores"]["total_score"]
+    generated_results_path = (
+        output_directory / "generated_conversation_scores.csv"
     )
 
-    result = {
-        "generation_number": generation_number,
-        "gpt_tutor": tutor_result,
-        "gpt_base": base_tutor_result,
-        "score_difference": score_difference,
-        "check_passed": score_difference > 0,
-    }
-
-    print(
-        f"\nScore difference for generation {generation_number}: "
-        f"{score_difference}"
+    generated_results_df.to_csv(
+        generated_results_path,
+        index=False,
     )
 
-    print(
-        f"Tutor is better than Base: "
-        f"{result['check_passed']}"
+    generated_tutor_summary = (
+        generated_results_df
+        .groupby("tutor_name")[
+            [
+                "student_independence",
+                "tutor_encourage",
+                "misunderstanding_identification",
+                "tutor_hints",
+                "student_progress",
+                "total_score",
+                "average_score",
+                "predicted_exam_score",
+            ]
+        ]
+        .agg(
+            [
+                "mean",
+                "std",
+                "min",
+                "median",
+                "max",
+                "count",
+            ]
+        )
     )
 
-    all_results.append(result)
-    total_conversations += 2
+    generated_tutor_summary_path = (
+        output_directory / "generated_tutor_summary.csv"
+    )
+
+    generated_tutor_summary.to_csv(
+        generated_tutor_summary_path
+    )
+
+    generated_problem_summary = (
+        generated_results_df
+        .groupby(
+            [
+                "session_id",
+                "grade",
+                "problem_id",
+                "tutor_name",
+            ]
+        )[
+            [
+                "total_score",
+                "average_score",
+                "predicted_exam_score",
+            ]
+        ]
+        .mean()
+        .reset_index()
+    )
+
+    generated_problem_summary_path = (
+        output_directory / "generated_problem_summary.csv"
+    )
+
+    generated_problem_summary.to_csv(
+        generated_problem_summary_path,
+        index=False,
+    )
+
+    print("\nGenerated tutor summary:")
+    print(generated_tutor_summary)
+
+    print("\nGenerated problem summary:")
+    print(generated_problem_summary)
+
+
+
+
+
+
+
+
 
 
 output = {
     "model": MODEL,
-    "problem": problem,
-    "grade": TARGET_GRADE,
-    "problem_id": TARGET_PROBLEM_ID,
+    "use_all_problems": True,
     "num_rounds": NUM_ROUNDS,
     "num_generated_conversations": total_conversations,
-    "num_tutor_comparisons": len(all_results),    
+    "num_tutor_comparisons": len(all_results),
     "results": all_results,
 }
 
@@ -928,7 +1893,4 @@ print(
 print(
     f"\nFinished generating {total_conversations} attribute-based conversations."
 )
-
-
-
 
