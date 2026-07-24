@@ -97,7 +97,7 @@ RUN_GENERATED_CONVERSATIONS = True
 TEST_SPLIT = 0.2
 
 
-
+RAW_CONVO_SAMPLE_SIZE = 500
 
 
 
@@ -994,32 +994,71 @@ def flatten_judge_scores(judge_scores):
 
 def judge_raw_conversations(raw_student_conversations):
 
+    checkpoint_path = (
+        output_directory / "raw_conversation_judge_checkpoint_500.csv"
+    )
+
+    completed_conversation_ids = set()
     judge_results = []
+
+    
+    sampled_conversation_ids = set(
+        raw_student_conversations["conversation_id"].astype(str).str.strip()
+    )
+
+    if checkpoint_path.exists() and checkpoint_path.stat().st_size > 0:
+        checkpoint_data = pd.read_csv(
+            checkpoint_path,
+            dtype={
+                "conversation_id": str,
+                "username": str,
+            },
+        )
+
+        checkpoint_data["conversation_id"] = (
+            checkpoint_data["conversation_id"]
+            .astype(str)
+            .str.strip()
+        )
+
+        checkpoint_data = checkpoint_data[
+            checkpoint_data["conversation_id"].isin(
+                sampled_conversation_ids
+            )
+        ].copy()
+
+        completed_conversation_ids = set(
+            checkpoint_data["conversation_id"]
+        )
+
+        judge_results = checkpoint_data.to_dict("records")
+
+
+
+
 
     for conversation_number, raw_student_conversation in enumerate(
         raw_student_conversations.to_dict("records"),
         start=1,
     ):
+        conversation_id = str(
+            raw_student_conversation["conversation_id"]
+        ).strip()
+
+        if conversation_id in completed_conversation_ids:
+            print(
+                f"Skipping previously judged conversation "
+                f"{conversation_number} of "
+                f"{len(raw_student_conversations)}"
+            )
+            continue
+
         current_problem = load_problem(
             csv_path=STUDENT_DATA_PATH,
             grade=raw_student_conversation["grade"],
             problem_id=raw_student_conversation["problem_id"],
             session_id=raw_student_conversation["session_id"],
         )
-
-        # current_correct_answer = load_correct_answer(
-        #     csv_path=STUDENT_DATA_PATH,
-        #     grade=raw_student_conversation["grade"],
-        #     problem_id=raw_student_conversation["problem_id"],
-        #     session_id=raw_student_conversation["session_id"],
-        # )
-
-        # current_solution_steps = load_solution_steps(
-        #     csv_path=STUDENT_DATA_PATH,
-        #     grade=raw_student_conversation["grade"],
-        #     problem_id=raw_student_conversation["problem_id"],
-        #     session_id=raw_student_conversation["session_id"],
-        # )
 
         current_solution_ref = load_solution_ref(
             csv_path=STUDENT_DATA_PATH,
@@ -1028,50 +1067,86 @@ def judge_raw_conversations(raw_student_conversations):
             session_id=raw_student_conversation["session_id"],
         )
 
-        # judge_scores = judge_conversation(
-        #     conversation=raw_student_conversation["conversation"],
-        #     current_problem=current_problem,
-        #     current_correct_answer=current_correct_answer,
-        #     current_solution_steps=current_solution_steps,
-        # )
-
-
         judge_scores = judge_conversation(
             conversation=raw_student_conversation["conversation"],
             current_problem=current_problem,
             current_solution_ref=current_solution_ref,
         )
 
+        # judge_result = {
+        #     "conversation_id": conversation_id,
+        #     "username": raw_student_conversation["username"],
+        #     "grade": raw_student_conversation["grade"],
+        #     "problem_id": raw_student_conversation["problem_id"],
+        #     "session_id": raw_student_conversation["session_id"],
+        #     "part2": raw_student_conversation["part2"],
+        #     "part3": raw_student_conversation["part3"],
+        #     "treatment": raw_student_conversation["treatment"],
+        #     "exam_score": raw_student_conversation["Score"],
+        #     "gpa_prev": raw_student_conversation["gpa_prev"],
+        #     "class": raw_student_conversation["Class"],
+        #     "treatment_arm": raw_student_conversation["Treatment arm"],
+        #     "judge_scores_json": json.dumps(
+        #         judge_scores,
+        #         ensure_ascii=False,
+        #     ),
+        # }
+
+
         judge_result = {
-            "conversation_id": raw_student_conversation["conversation_id"],
-            "username": raw_student_conversation["username"],
-            "grade": raw_student_conversation["grade"],
-            "problem_id": raw_student_conversation["problem_id"],
-            "session_id": raw_student_conversation["session_id"],
-            "part2": raw_student_conversation["part2"],
-            "part3": raw_student_conversation["part3"],
-            "treatment": raw_student_conversation["treatment"],
-            "exam_score": raw_student_conversation["Score"],
-            "gpa_prev": raw_student_conversation["gpa_prev"],
-            "class": raw_student_conversation["Class"],
-            "treatment_arm": raw_student_conversation["Treatment arm"],
-            "judge_scores": judge_scores,
+            key: value
+            for key, value in raw_student_conversation.items()
+            if key != "conversation"
         }
+
+        judge_result.update(
+            {
+                "exam_score": raw_student_conversation["Score"],
+                "problem_text": current_problem,
+                "solution_reference": current_solution_ref,
+                "conversation_json": json.dumps(
+                    raw_student_conversation["conversation"],
+                    ensure_ascii=False,
+                ),
+                "conversation_text": format_conversation_judge(
+                    raw_student_conversation["conversation"]
+                ),
+                "judge_model": JUDGE_MODEL,
+                "judge_scores_json": json.dumps(
+                    judge_scores,
+                    ensure_ascii=False,
+                ),
+            }
+        )
+
+
 
         judge_result.update(
             flatten_judge_scores(judge_scores)
         )
 
         judge_results.append(judge_result)
+        completed_conversation_ids.add(conversation_id)
+
+        checkpoint_row = pd.DataFrame([judge_result])
+
+        file_already_has_data = (
+            checkpoint_path.exists()
+            and checkpoint_path.stat().st_size > 0
+        )
+
+        checkpoint_row.to_csv(
+            checkpoint_path,
+            mode="a",
+            header=not file_already_has_data,
+            index=False,
+        )
 
         print(
-            f"Judged raw conversation {conversation_number} of "
-            f"{len(raw_student_conversations)}"
+            f"Judged and saved raw conversation {conversation_number} of {len(raw_student_conversations)}"
         )
 
     return judge_results
-
-
 
 
 
@@ -1110,6 +1185,18 @@ def fit_grade_regression(judge_results):
         split.split(X, Y, groups=groups)
     )
 
+    judge_results["split"] = ""
+
+    judge_results.loc[
+        train_index,
+        "split"
+    ] = "train"
+
+    judge_results.loc[
+        test_index,
+        "split"
+    ] = "test"
+
     X_train = X.iloc[train_index]
     X_test = X.iloc[test_index]
     Y_train = Y.iloc[train_index]
@@ -1143,6 +1230,15 @@ def fit_grade_regression(judge_results):
     }
 
     judge_results["predicted_score"] = regress_model.predict(X)
+    
+    judge_results["prediction_error"] = (
+        judge_results["exam_score"]
+        - judge_results["predicted_score"]
+    )
+
+    judge_results["absolute_prediction_error"] = (
+        judge_results["prediction_error"].abs()
+    )
 
     return regress_model, regression_results, judge_results
 
@@ -1439,6 +1535,54 @@ if RUN_RAW_CONVERSATION_JUDGE:
         problem_part3_path=PROBLEM_PART3_PATH,
     )
 
+    sample_size = min(
+        RAW_CONVO_SAMPLE_SIZE,
+        len(raw_student_conversations),
+    )
+
+    raw_student_conversations = (
+        raw_student_conversations
+        .sample(
+            n=sample_size,
+            random_state=RAND,
+            replace=False,
+        )
+        .reset_index(drop=True)
+    )
+
+    raw_sample_path = (
+        output_directory / "raw_conversation_sample_500.csv"
+    )
+
+    raw_sample_to_save = raw_student_conversations.copy()
+
+    raw_sample_to_save["conversation_json"] = (
+        raw_sample_to_save["conversation"].apply(
+            lambda conversation: json.dumps(
+                conversation,
+                ensure_ascii=False,
+            )
+        )
+    )
+
+    raw_sample_to_save = raw_sample_to_save.drop(
+        columns=["conversation"],
+        errors="ignore",
+    )
+
+    raw_sample_to_save.to_csv(
+        raw_sample_path,
+        index=False,
+    )
+
+    print(
+        f"Saved the exact sampled conversations to "
+        f"{raw_sample_path}"
+    )
+
+    print(
+        f"\nRandomly sampled {len(raw_student_conversations)} raw conversations for judging."
+    )
 
     raw_judge_results = judge_raw_conversations(
         raw_student_conversations=raw_student_conversations
@@ -1717,6 +1861,15 @@ if RUN_GENERATED_CONVERSATIONS:
                     "grade": generated_result["grade"],
                     "problem_id": generated_result["problem_id"],
                     "tutor_name": generated_result["tutor_name"],
+                    "problem_text": generated_result["problem"],
+                    "solution_reference": generated_result["solution_reference"],
+                    "sampled_real_conversation_id": json.dumps(generated_result["sampled_real_conversation_id"], ensure_ascii=False),
+                    "sampled_real_conversation_text": (generated_result["sampled_real_conversation_text"]),
+                    "student_attributes_json": json.dumps(generated_result["student_attributes"], ensure_ascii=False),
+                    "conversation_json": json.dumps(generated_result["conversation"], ensure_ascii=False),
+                    "conversation_text": format_conversation_judge(generated_result["conversation"]),
+                    "judge_model": JUDGE_MODEL,
+                    "judge_scores_json": json.dumps(generated_result["judge_scores"], ensure_ascii=False),
                     "total_score": generated_result["judge_scores"]["total_score"],
                     "average_score": generated_result["judge_scores"]["average_score"],
                     "student_independence": generated_result["judge_scores"]["student_independence"]["score"],

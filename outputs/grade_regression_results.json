@@ -1,0 +1,26 @@
+{
+  "features": [
+    "student_independence",
+    "tutor_encourage",
+    "misunderstanding_identification",
+    "tutor_hints",
+    "student_progress"
+  ],
+  "target": "Part Three per-problem Score",
+  "num_rows": 500,
+  "num_students": 312,
+  "num_train_rows": 401,
+  "num_test_rows": 99,
+  "intercept": 0.2610215163488462,
+  "coefficients": {
+    "student_independence": 0.046161565069774035,
+    "tutor_encourage": -0.009192960303560534,
+    "misunderstanding_identification": -0.008991617818740109,
+    "tutor_hints": -0.02331693988707345,
+    "student_progress": 0.026444026668613868
+  },
+  "train_r2": 0.04622269044808569,
+  "test_r2": 0.019282403423608763,
+  "test_absolute_error": 0.2662945173393888,
+  "test_rmse": 0.32011357621389963
+}
